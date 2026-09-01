@@ -1,2 +1,27 @@
-.venv/
+# env
 .env
+.env.local
+*.env
+
+# node
+node_modules/
+.next/
+out/
+frontend/.next/
+frontend/node_modules/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+backend/__pycache__/
+
+# db/data
+pgdata/
+redisdata/
+
+# os/editor
+.DS_Store
+.vscode/
+.idea/
