@@ -1,5 +1,5 @@
 from pathlib import Path
-
+import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT_ENV = Path(__file__).resolve().parent.parent.parent / ".env"
@@ -19,5 +19,6 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=ROOT_ENV, extra="ignore")
 
+    STORAGE_DIR: str = os.getenv("STORAGE_DIR", "./data")
 
 settings = Settings()
