@@ -1,7 +1,7 @@
 """add hnsw index on resume_chunks.embedding
 
 Revision ID: 0002
-Revises: <PUT_PREVIOUS_REVISION_ID>
+Revises: 0001
 Create Date: 2026-09-01
 """
 from alembic import op
