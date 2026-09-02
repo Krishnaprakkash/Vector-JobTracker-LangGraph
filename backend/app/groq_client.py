@@ -9,7 +9,8 @@ MODELS = {
     "score": "qwen/qwen3.6-27b",
     "reason": "qwen/qwen3.8-27b",
     "cover_letter": "groq/compound-mini",
-    "fallback": "openai/gpt-oss-120b",
+    "comp": "groq/compound",
+    "resume_optimize": "openai/gpt-oss-120b",
 }
 
 

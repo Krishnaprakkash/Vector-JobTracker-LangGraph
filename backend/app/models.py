@@ -86,11 +86,3 @@ class Job(Base):
 
     user: Mapped["User"] = relationship(back_populates="jobs")
     __table_args__ = (UniqueConstraint("user_id", "dedup_hash", name="uq_user_dedup_hash"),)
-
-class PinnedCompany(Base):
-    __tablename__ = "pinned_companies"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    company_slug: Mapped[str] = mapped_column(String)
-    ats_source: Mapped[str] = mapped_column(String)  # greenhouse | lever | ashby
-    __table_args__ = (UniqueConstraint("user_id", "company_slug", "ats_source"),)

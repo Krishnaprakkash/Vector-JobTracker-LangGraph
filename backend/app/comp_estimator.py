@@ -1,13 +1,9 @@
 import json
 import re
-from groq import AsyncGroq
 
-from .config import settings
 from .seniority import detect_seniority
 from .comp_cache import get_cached_comp, set_cached_comp
-
-client = AsyncGroq(api_key=settings.GROQ_API_KEY)
-MODEL = "groq/compound"
+from .rate_limiter import route_call
 
 SYSTEM_PROMPT = (
     "You are a compensation research assistant. Given a job title, location, "
@@ -48,17 +44,18 @@ def _parse_ashby_summary(summary: str | None) -> dict | None:
         return int(float(s))
 
     try:
-        currency = "USD" if "$" in summary else "USD"
-        return {"comp_min": to_int(numbers[0]), "comp_max": to_int(numbers[1]), "comp_currency": currency}
+        return {"comp_min": to_int(numbers[0]), "comp_max": to_int(numbers[1]), "comp_currency": "USD"}
     except ValueError:
         return None
 
 
 async def resolve_compensation(job: dict) -> dict:
-    """Returns {comp_min, comp_max, comp_currency, comp_estimated}."""
+    """Returns {comp_min, comp_max, comp_currency, comp_estimated, status}.
+    status: 'ok' | 'pending_retry'
+    """
     parsed = _parse_ashby_summary(job.get("comp_raw_summary"))
     if parsed:
-        return {**parsed, "comp_estimated": False}
+        return {**parsed, "comp_estimated": False, "status": "ok"}
 
     title = job.get("title", "")
     location = job.get("location", "") or "Remote"
@@ -67,25 +64,29 @@ async def resolve_compensation(job: dict) -> dict:
 
     cached = await get_cached_comp(title, location, seniority)
     if cached:
-        return {**cached, "comp_estimated": True}
+        return {**cached, "comp_estimated": True, "status": "ok"}
 
     prompt = f"Title: {title}\nLocation: {location}\nSeniority: {seniority}"
-    try:
-        response = await client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=200,
-        )
-        raw_text = response.choices[0].message.content
-    except Exception:
-        return {"comp_min": None, "comp_max": None, "comp_currency": None, "comp_estimated": True}
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": prompt},
+    ]
 
-    estimated = _parse_llm_json(raw_text)
+    result = await route_call("comp", messages, est_tokens=300, max_tokens=200)
+
+    if result["status"] != "ok":
+        return {
+            "comp_min": None, "comp_max": None, "comp_currency": None,
+            "comp_estimated": True, "status": "pending_retry",
+            "reset_at": result.get("reset_at"),
+        }
+
+    estimated = _parse_llm_json(result["content"])
     if not estimated:
-        return {"comp_min": None, "comp_max": None, "comp_currency": None, "comp_estimated": True}
+        return {
+            "comp_min": None, "comp_max": None, "comp_currency": None,
+            "comp_estimated": True, "status": "pending_retry",
+        }
 
     await set_cached_comp(title, location, seniority, estimated)
-    return {**estimated, "comp_currency": estimated["comp_currency"], "comp_estimated": True}
+    return {**estimated, "comp_estimated": True, "status": "ok"}

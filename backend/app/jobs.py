@@ -1,4 +1,3 @@
-# backend/app/jobs.py
 import uuid
 import json
 
@@ -9,17 +8,19 @@ import redis.asyncio as aioredis
 
 from .config import settings
 from .db import get_db, AsyncSessionLocal
-from .models import Job, JobStatus, PinnedCompany, User
+from .models import Job, JobStatus, User
 from .dedup import compute_job_hash
 from .comp_estimator import resolve_compensation
 from .scrapers.greenhouse import fetch_greenhouse_jobs
 from .scrapers.lever import fetch_lever_jobs
 from .scrapers.ashby import fetch_ashby_jobs
 from .scrapers.ddgs_fallback import search_jobs_ddgs, relax_query
+from .resume_matcher import select_resume_for_query, select_resume_for_job
+from .scoring import score_pending_jobs
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
-MAX_SLOTS = 50
+MAX_SLOTS = 150
 _redis: aioredis.Redis | None = None
 
 
@@ -42,19 +43,33 @@ ATS_FETCHERS = {
     "ashby": fetch_ashby_jobs,
 }
 
+# Verified live via seed check — (slug, ats_source)
+VERIFIED_COMPANIES = [
+    ("stripe", "greenhouse"), ("airbnb", "greenhouse"), ("coinbase", "greenhouse"),
+    ("robinhood", "greenhouse"), ("instacart", "greenhouse"), ("asana", "greenhouse"),
+    ("databricks", "greenhouse"), ("gitlab", "greenhouse"), ("reddit", "greenhouse"),
+    ("roblox", "greenhouse"), ("affirm", "greenhouse"), ("lyft", "greenhouse"),
+    ("pinterest", "greenhouse"), ("twilio", "greenhouse"), ("squarespace", "greenhouse"),
+    ("peloton", "greenhouse"), ("chime", "greenhouse"), ("brex", "greenhouse"),
+    ("gusto", "greenhouse"), ("flexport", "greenhouse"), ("figma", "greenhouse"),
+    ("discord", "greenhouse"), ("webflow", "greenhouse"), ("duolingo", "greenhouse"),
+    ("spotify", "lever"), ("palantir", "lever"),
+    ("openai", "ashby"), ("linear", "ashby"), ("notion", "ashby"), ("ramp", "ashby"),
+    ("supabase", "ashby"), ("posthog", "ashby"), ("replit", "ashby"), ("cohere", "ashby"),
+    ("zapier", "ashby"), ("render", "ashby"), ("docker", "ashby"), ("benchling", "ashby"),
+    ("workos", "ashby"), ("confluent", "ashby"), ("airwallex", "ashby"), ("crusoe", "ashby"),
+]
 
-async def _fetch_pinned_jobs(user_id: uuid.UUID, db: AsyncSession, remaining_slots: int) -> list[dict]:
-    result = await db.execute(select(PinnedCompany).where(PinnedCompany.user_id == user_id))
-    pinned = result.scalars().all()
 
+async def _fetch_static_company_jobs(remaining_slots: int) -> list[dict]:
     jobs = []
-    for p in pinned:
-        fetcher = ATS_FETCHERS.get(p.ats_source)
+    for slug, ats in VERIFIED_COMPANIES:
+        fetcher = ATS_FETCHERS.get(ats)
         if not fetcher:
             continue
-        found = await fetcher(p.company_slug)
+        found = await fetcher(slug)
         for j in found:
-            j["source"] = p.ats_source
+            j["source"] = ats
             jobs.append(j)
         if len(jobs) >= remaining_slots:
             break
@@ -70,7 +85,12 @@ async def _fetch_general_jobs(role_query: str, needed: int) -> list[dict]:
     return jobs[:needed]
 
 
-async def _insert_jobs(user_id: uuid.UUID, db: AsyncSession, raw_jobs: list[dict]) -> int:
+async def _insert_jobs(
+    user_id: uuid.UUID,
+    db: AsyncSession,
+    raw_jobs: list[dict],
+    batch_resume_id: uuid.UUID | None,  # set if query provided; None if blank-query (per-job selection)
+) -> int:
     inserted = 0
     for j in raw_jobs:
         company = j.get("company") or "unknown"
@@ -87,8 +107,16 @@ async def _insert_jobs(user_id: uuid.UUID, db: AsyncSession, raw_jobs: list[dict
 
         comp = await resolve_compensation(j)
 
+        resume_id = batch_resume_id
+        status = JobStatus.pending_scoring if resume_id else JobStatus.browsing
+        if resume_id is None:
+            resume_id = await select_resume_for_job(db, user_id, j.get("description", ""))
+            if resume_id:
+                status = JobStatus.pending_scoring
+
         db.add(Job(
             user_id=user_id,
+            resume_id=resume_id,
             company=company,
             title=title,
             url=j.get("url"),
@@ -96,7 +124,7 @@ async def _insert_jobs(user_id: uuid.UUID, db: AsyncSession, raw_jobs: list[dict
             location=j.get("location"),
             source=j.get("source", "ddgs"),
             dedup_hash=job_hash,
-            status=JobStatus.browsing,
+            status=status,
             comp_min=comp.get("comp_min"),
             comp_max=comp.get("comp_max"),
             comp_currency=comp.get("comp_currency"),
@@ -106,15 +134,6 @@ async def _insert_jobs(user_id: uuid.UUID, db: AsyncSession, raw_jobs: list[dict
 
     await db.commit()
     return inserted
-
-
-async def _select_resume_for_batch(user: User, query: str | None) -> uuid.UUID | None:
-    if not user.resumes:
-        return None
-    if query:
-        # single resume for whole batch — real matching logic lands in Phase 4
-        return user.resumes[0].id
-    return None  # blank query: per-job resume selection happens in Phase 4 scoring step
 
 
 async def _run_refresh(user_id: uuid.UUID, task_id: str, query: str | None):
@@ -132,28 +151,29 @@ async def _run_refresh(user_id: uuid.UUID, task_id: str, query: str | None):
                 await _set_task_status(task_id, "done", {"inserted": 0, "reason": "board_full"})
                 return
 
-            pinned_jobs = await _fetch_pinned_jobs(user_id, db, n_slots)
-            remaining = n_slots - len(pinned_jobs)
+            static_jobs = await _fetch_static_company_jobs(n_slots)
+            remaining = n_slots - len(static_jobs)
 
             general_jobs = []
             if remaining > 0:
                 role_query = query or "software engineer"
                 general_jobs = await _fetch_general_jobs(role_query, remaining)
 
-            all_jobs = pinned_jobs + general_jobs
-            inserted = await _insert_jobs(user_id, db, all_jobs)
+            all_jobs = static_jobs + general_jobs
 
-            user = await db.get(User, user_id)
-            resume_id = await _select_resume_for_batch(user, query)
-            if resume_id:
-                await db.execute(
-                    Job.__table__.update()
-                    .where(Job.user_id == user_id, Job.status == JobStatus.browsing, Job.resume_id.is_(None))
-                    .values(resume_id=resume_id, status=JobStatus.pending_scoring)
-                )
-                await db.commit()
+            batch_resume_id = None
+            if query:
+                batch_resume_id = await select_resume_for_query(db, user_id, query)
 
-            await _set_task_status(task_id, "done", {"inserted": inserted})
+            inserted = await _insert_jobs(user_id, db, all_jobs, batch_resume_id)
+
+            score_summary = await score_pending_jobs(db, user_id)
+
+            await _set_task_status(task_id, "done", {
+                "inserted": inserted,
+                "scored": score_summary["scored"],
+                "failed": score_summary["failed"],
+            })
         except Exception as e:
             await _set_task_status(task_id, "failed", {"error": str(e)})
 

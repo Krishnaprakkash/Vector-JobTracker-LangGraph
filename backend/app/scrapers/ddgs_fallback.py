@@ -6,17 +6,17 @@ TIMEOUT = 5.0
 ATS_FILTER = "site:boards.greenhouse.io OR site:jobs.lever.co OR site:jobs.ashbyhq.com"
 
 SLUG_PATTERNS = [
-    re.compile(r"boards\.greenhouse\.io/([^/]+)/"),
-    re.compile(r"jobs\.lever\.co/([^/]+)/"),
-    re.compile(r"jobs\.ashbyhq\.com/([^/]+)/"),
+    (re.compile(r"boards\.greenhouse\.io/([^/]+)/"), "greenhouse"),
+    (re.compile(r"jobs\.lever\.co/([^/]+)/"), "lever"),
+    (re.compile(r"jobs\.ashbyhq\.com/([^/]+)/"), "ashby"),
 ]
 
 
-def extract_company_slug(url: str) -> str | None:
-    for pattern in SLUG_PATTERNS:
+def extract_company_slug(url: str) -> tuple[str, str] | None:
+    for pattern, ats_name in SLUG_PATTERNS:
         match = pattern.search(url)
         if match:
-            return match.group(1)
+            return match.group(1), ats_name
     return None
 
 
@@ -32,16 +32,19 @@ def search_jobs_ddgs(role_query: str, max_results: int = 20) -> list[dict]:
     jobs = []
     for r in results:
         url = r.get("href", "")
-        company = extract_company_slug(url)
+        parsed = extract_company_slug(url)
+        if not parsed:
+            continue
+        company, ats_name = parsed
         jobs.append({
             "title": r.get("title", ""),
             "company": company,
             "location": None,
             "description": r.get("body", ""),
             "url": url,
-            "source": "ddgs",
+            "source": ats_name,  # now the real ATS, not literal "ddgs"
         })
-    return [j for j in jobs if j["company"]]  # drop unparseable results
+    return jobs
 
 
 def relax_query(role_query: str) -> str:
