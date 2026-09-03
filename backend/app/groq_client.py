@@ -6,11 +6,10 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 MODELS = {
     "extract": "openai/gpt-oss-20b",
-    "score": "qwen/qwen3.6-27b",
-    "reason": "qwen/qwen3.8-27b",
-    "cover_letter": "groq/compound-mini",
-    "comp": "groq/compound",
+    "score_reason": "qwen/qwen3.8-27b",
+    "comp": "qwen/qwen3.6-27b",
     "resume_optimize": "openai/gpt-oss-120b",
+    "cover_letter": "openai/gpt-oss-120b",
 }
 
 
@@ -29,14 +28,30 @@ async def call_groq(role: str, messages: list[dict], max_tokens: int = 1024, tem
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
+    print(f"PAYLOAD SIZE: {len(str(payload))} chars, model={model}")
     headers = {"Authorization": f"Bearer {settings.groq_api_key}"}
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(GROQ_URL, json=payload, headers=headers)
 
-    if resp.status_code in (429, 503):
+    if resp.status_code in (429, 503, 413):
         raise GroqError(resp.status_code, resp.text)
     resp.raise_for_status()
 
     data = resp.json()
     return data["choices"][0]["message"]["content"]
+
+async def call_groq_with_tools(role: str, messages: list[dict], tools: list[dict], max_tokens: int = 1024) -> dict:
+    model = MODELS[role]
+    payload = {"model": model, "messages": messages, "tools": tools, "max_tokens": max_tokens, "temperature": 0.2}
+    headers = {"Authorization": f"Bearer {settings.groq_api_key}"}
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(GROQ_URL, json=payload, headers=headers)
+
+    if resp.status_code in (429, 503, 413):
+        raise GroqError(resp.status_code, resp.text)
+    resp.raise_for_status()
+
+    data = resp.json()
+    return data["choices"][0]["message"]

@@ -68,8 +68,8 @@ async def score_job_fit(
     extracted: dict | None,
     resume_chunks: list[str],
 ) -> dict | None:
-    requirements_text = json.dumps(extracted) if extracted else "Not available"
-    resume_text = "\n---\n".join(resume_chunks) if resume_chunks else "No resume excerpts available"
+    requirements_text = json.dumps(extracted)[:1500] if extracted else "Not available"
+    resume_text = "\n---\n".join(c[:800] for c in resume_chunks) if resume_chunks else "No resume excerpts available"
 
     prompt = (
         f"Job Title: {job_title}\n"
@@ -82,7 +82,7 @@ async def score_job_fit(
         {"role": "user", "content": prompt},
     ]
 
-    result = await route_call("score", messages, est_tokens=600, max_tokens=300)
+    result = await route_call("score_reason", messages, est_tokens=800, max_tokens=300)
     if result["status"] != "ok":
         return None
 

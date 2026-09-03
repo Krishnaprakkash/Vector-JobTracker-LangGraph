@@ -86,3 +86,14 @@ class Job(Base):
 
     user: Mapped["User"] = relationship(back_populates="jobs")
     __table_args__ = (UniqueConstraint("user_id", "dedup_hash", name="uq_user_dedup_hash"),)
+
+class CoverLetter(Base):
+    __tablename__ = "cover_letters"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
+    resume_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("resumes.id", ondelete="CASCADE"))
+    content: Mapped[str] = mapped_column(Text)
+    iteration_count: Mapped[int] = mapped_column(default=1)
+    needs_manual_edit: Mapped[bool] = mapped_column(default=False)
+    pdf_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

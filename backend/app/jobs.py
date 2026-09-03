@@ -27,7 +27,7 @@ _redis: aioredis.Redis | None = None
 def _get_redis() -> aioredis.Redis:
     global _redis
     if _redis is None:
-        _redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
     return _redis
 
 
@@ -175,6 +175,8 @@ async def _run_refresh(user_id: uuid.UUID, task_id: str, query: str | None):
                 "failed": score_summary["failed"],
             })
         except Exception as e:
+            import traceback
+            traceback.print_exc()  # temporary debug line
             await _set_task_status(task_id, "failed", {"error": str(e)})
 
 
@@ -222,3 +224,28 @@ async def get_task_status(task_id: str):
     if not raw:
         raise HTTPException(404, "Task not found")
     return json.loads(raw)
+
+@router.get("")
+async def list_jobs(user_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Job).where(Job.user_id == user_id, Job.status == JobStatus.browsing).order_by(Job.created_at)
+    )
+    jobs = result.scalars().all()
+    return [
+        {
+            "id": j.id,
+            "company": j.company,
+            "title": j.title,
+            "url": j.url,
+            "location": j.location,
+            "source": j.source,
+            "match_score": j.match_score,
+            "match_rationale": j.match_rationale,
+            "comp_min": j.comp_min,
+            "comp_max": j.comp_max,
+            "comp_currency": j.comp_currency,
+            "comp_estimated": j.comp_estimated,
+            "status": j.status.value,
+        }
+        for j in jobs
+    ]

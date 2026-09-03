@@ -2,7 +2,7 @@ import time
 from redis.asyncio import Redis
 
 from app.config import settings
-from app.groq_client import call_groq, MODELS, GroqError
+from app.groq_client import call_groq, MODELS, GroqError, call_groq_with_tools
 
 redis = Redis.from_url(settings.redis_url, decode_responses=True)
 
@@ -10,8 +10,6 @@ LIMITS = {
     "openai/gpt-oss-20b": (30, 1000, 8000, 200_000),
     "qwen/qwen3.6-27b": (30, 1000, 8000, 200_000),
     "qwen/qwen3.8-27b": (30, 1000, 8000, 200_000),
-    "groq/compound-mini": (30, 250, 70_000, None),
-    "groq/compound": (30, 250, 70_000, None),
     "openai/gpt-oss-120b": (30, 1000, 8000, 200_000),
 }
 
@@ -80,4 +78,19 @@ async def route_call(
         return {"status": "ok", "content": content}
     except GroqError:
         reset_at = int(time.time()) + 30  # generic short backoff on transient Groq error
+        return {"status": "quota_exceeded", "reset_at": reset_at}
+
+async def route_call_with_tools(role: str, messages: list[dict], tools: list[dict], est_tokens: int = 500, max_tokens: int = 1024) -> dict:
+    model = MODELS[role]
+    has_headroom, blocking_dim = await _headroom_check(model, est_tokens)
+    if not has_headroom:
+        reset_at = await _reset_time(model, blocking_dim)
+        return {"status": "quota_exceeded", "reset_at": reset_at}
+
+    try:
+        message = await call_groq_with_tools(role, messages, tools, max_tokens=max_tokens)
+        await _consume(model, est_tokens)
+        return {"status": "ok", "message": message}
+    except GroqError:
+        reset_at = int(time.time()) + 30
         return {"status": "quota_exceeded", "reset_at": reset_at}

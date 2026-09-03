@@ -14,6 +14,7 @@ class Settings(BaseSettings):
 
     groq_api_key: str
     tavily_api_key: str = ""
+    tavily_cover_letter_api_key: str = ""
 
     frontend_origin: str = "http://localhost:3000"
 
