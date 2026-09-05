@@ -5,13 +5,14 @@ from app.config import settings
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 MODELS = {
-    "extract": "openai/gpt-oss-20b",
+    "extract": "qwen/qwen3.6-27b",
+    "html_parse": "qwen/qwen3.6-27b",
+    "query_extract": "qwen/qwen3.6-27b",
     "score_reason": "qwen/qwen3.8-27b",
-    "comp": "qwen/qwen3.6-27b",
+    "comp": "openai/gpt-oss-20b",
     "resume_optimize": "openai/gpt-oss-120b",
     "cover_letter": "openai/gpt-oss-120b",
 }
-
 
 class GroqError(Exception):
     def __init__(self, status_code: int, message: str):
@@ -20,7 +21,7 @@ class GroqError(Exception):
         super().__init__(message)
 
 
-async def call_groq(role: str, messages: list[dict], max_tokens: int = 1024, temperature: float = 0.2) -> str:
+async def call_groq(role: str, messages: list[dict], max_tokens: int = 1024, temperature: float = 0.2, reasoning_effort: str | None = None) -> str:
     model = MODELS[role]
     payload = {
         "model": model,
@@ -28,13 +29,14 @@ async def call_groq(role: str, messages: list[dict], max_tokens: int = 1024, tem
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
-    print(f"PAYLOAD SIZE: {len(str(payload))} chars, model={model}")
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
     headers = {"Authorization": f"Bearer {settings.groq_api_key}"}
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(GROQ_URL, json=payload, headers=headers)
 
-    if resp.status_code in (429, 503, 413):
+    if resp.status_code in (429, 503, 413, 400):
         raise GroqError(resp.status_code, resp.text)
     resp.raise_for_status()
 
@@ -49,7 +51,7 @@ async def call_groq_with_tools(role: str, messages: list[dict], tools: list[dict
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(GROQ_URL, json=payload, headers=headers)
 
-    if resp.status_code in (429, 503, 413):
+    if resp.status_code in (429, 503, 413, 400):
         raise GroqError(resp.status_code, resp.text)
     resp.raise_for_status()
 

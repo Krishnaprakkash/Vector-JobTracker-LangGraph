@@ -50,3 +50,13 @@ def search_jobs_ddgs(role_query: str, max_results: int = 20) -> list[dict]:
 def relax_query(role_query: str) -> str:
     words = role_query.split()
     return " ".join(words[:2]) if len(words) > 2 else role_query
+
+def search_jobs_ddgs_general(role_query: str, max_results: int = 20) -> list[str]:
+    """Returns raw URLs, no site: filter — used as source for html_parse fallback."""
+    query = f"{role_query} jobs"
+    try:
+        with DDGS(timeout=TIMEOUT) as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+    except Exception:
+        return []
+    return [r.get("href", "") for r in results if r.get("href")]

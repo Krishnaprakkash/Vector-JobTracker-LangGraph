@@ -61,23 +61,20 @@ async def _consume(model: str, tokens_used: int):
 
 
 async def route_call(
-    role: str, messages: list[dict], est_tokens: int = 500, max_tokens: int = 1024
+    role: str, messages: list[dict], est_tokens: int = 500, max_tokens: int = 1024, reasoning_effort: str | None = None
 ) -> dict:
-    """Returns {"status": "ok", "content": str} or
-              {"status": "quota_exceeded", "reset_at": int (unix ts)}"""
     model = MODELS[role]
-
     has_headroom, blocking_dim = await _headroom_check(model, est_tokens)
     if not has_headroom:
         reset_at = await _reset_time(model, blocking_dim)
         return {"status": "quota_exceeded", "reset_at": reset_at}
 
     try:
-        content = await call_groq(role, messages, max_tokens=max_tokens)
+        content = await call_groq(role, messages, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
         await _consume(model, est_tokens)
         return {"status": "ok", "content": content}
     except GroqError:
-        reset_at = int(time.time()) + 30  # generic short backoff on transient Groq error
+        reset_at = int(time.time()) + 30
         return {"status": "quota_exceeded", "reset_at": reset_at}
 
 async def route_call_with_tools(role: str, messages: list[dict], tools: list[dict], est_tokens: int = 500, max_tokens: int = 1024) -> dict:

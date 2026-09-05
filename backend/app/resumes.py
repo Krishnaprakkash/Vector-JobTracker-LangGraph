@@ -1,9 +1,9 @@
-# backend/app/resumes.py
 import os
 import uuid
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
@@ -103,3 +103,9 @@ async def delete_resume(resume_id: uuid.UUID, db: AsyncSession = Depends(get_db)
     if os.path.exists(path):
         os.remove(path)
     return {"status": "deleted"}
+
+@router.get("")
+async def list_resumes(user_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Resume).where(Resume.user_id == user_id).order_by(Resume.created_at.desc()))
+    resumes = result.scalars().all()
+    return [{"id": r.id, "filename": r.filename, "created_at": r.created_at.isoformat()} for r in resumes]

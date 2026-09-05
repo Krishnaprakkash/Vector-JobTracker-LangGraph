@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { refreshJobs, clearJobs, getTaskStatus, getJobs } from "@/lib/api";
+import { clearJobs, getTaskStatus, getJobs } from "@/lib/api";
 import JobCard from "./JobCard";
 import SearchBar from "./SearchBar";
 
@@ -42,13 +42,6 @@ export default function JobBoard() {
   const handleRefresh = async () => {
     setLoading(true);
     setStatusMsg("Refreshing...");
-    const { task_id } = await refreshJobs();
-    pollTask(task_id);
-  };
-
-  const handleClear = async () => {
-    setLoading(true);
-    setStatusMsg("Clearing...");
     const { task_id } = await clearJobs();
     pollTask(task_id);
   };
@@ -58,13 +51,13 @@ export default function JobBoard() {
       <SearchBar onSearch={handleRefresh} />
 
       <div className="flex gap-3 mb-4 items-center">
-        <button onClick={handleRefresh} disabled={loading} className="px-4 py-2 bg-black text-white rounded disabled:opacity-50">
-          Refresh
+        <button onClick={handleRefresh} disabled={loading} className="px-4 py-2 bg-black text-white rounded disabled:opacity-50 flex items-center gap-2">
+          {loading && (
+            <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+          )}
+          {loading ? "Refreshing..." : "Refresh"}
         </button>
-        <button onClick={handleClear} disabled={loading} className="px-4 py-2 border rounded disabled:opacity-50">
-          Clear
-        </button>
-        {statusMsg && <span className="text-sm text-gray-500">{statusMsg}</span>}
+        {statusMsg && !loading && <span className="text-sm text-gray-500">{statusMsg}</span>}
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
