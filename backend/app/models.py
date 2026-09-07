@@ -30,6 +30,7 @@ class User(Base):
 
     resumes: Mapped[list["Resume"]] = relationship(back_populates="user")
     jobs: Mapped[list["Job"]] = relationship(back_populates="user")
+    home_location: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class Resume(Base):

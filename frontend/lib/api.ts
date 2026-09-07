@@ -68,3 +68,10 @@ export async function addManualJob(data: {
   const res = await fetch(`${API_BASE}/api/jobs/manual?${params}`, { method: "POST" });
   return res.json();
 }
+
+export async function updateHomeLocation(location: string) {
+  const res = await fetch(`${API_BASE}/api/user/me?user_id=${DEV_USER_ID}&home_location=${encodeURIComponent(location)}`, {
+    method: "PATCH",
+  });
+  return res.json();
+}

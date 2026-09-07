@@ -18,12 +18,13 @@ from .comp_estimator import resolve_compensation
 from .scrapers.greenhouse import fetch_greenhouse_jobs
 from .scrapers.lever import fetch_lever_jobs
 from .scrapers.ashby import fetch_ashby_jobs
-from .scrapers.ddgs_fallback import search_jobs_ddgs, relax_query, search_jobs_ddgs_general
+from .scrapers.smartrecruiters import fetch_smartrecruiters_jobs
+from .scrapers.recruitee import fetch_recruitee_jobs
+from .scrapers.workable import fetch_workable_jobs
 from .resume_matcher import select_resume_for_query, select_resume_for_job
 from .scoring import score_pending_jobs
 from .embeddings import embed_query, embed_texts
-from .scrapers.html_parse_fallback import parse_job_from_url
-from .location_filter import location_matches
+from .location_filter import location_matches_strict
 from .query_extract import extract_query_filters
 from .seniority import detect_seniority
 
@@ -31,7 +32,6 @@ from .seniority import detect_seniority
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
 MAX_SLOTS = 70
-MAX_HTML_PARSE_CALLS = 20
 MAX_JOBS_PER_COMPANY = 5
 _redis: aioredis.Redis | None = None
 
@@ -59,6 +59,9 @@ ATS_FETCHERS = {
     "greenhouse": fetch_greenhouse_jobs,
     "lever": fetch_lever_jobs,
     "ashby": fetch_ashby_jobs,
+    "smartrecruiters": fetch_smartrecruiters_jobs,
+    "recruitee": fetch_recruitee_jobs,
+    "workable": fetch_workable_jobs,
 }
 
 # Verified live via seed check — (slug, ats_source)
@@ -82,38 +85,24 @@ _COMPANIES_BY_ATS = defaultdict(list)
 for slug, ats in VERIFIED_COMPANIES:
     _COMPANIES_BY_ATS[ats].append(slug)
 
-async def _fetch_html_parse_jobs(role_query: str, needed: int) -> list[dict]:
-    urls = search_jobs_ddgs_general(role_query, max_results=min(needed * 2, MAX_HTML_PARSE_CALLS))
-    jobs = []
-    for url in urls[:MAX_HTML_PARSE_CALLS]:
-        parsed = await parse_job_from_url(url)
-        if parsed:
-            jobs.append(parsed)
-        if len(jobs) >= needed:
-            break
-    return jobs
-
 
 async def _fetch_static_company_jobs(
-    remaining_slots: int,
-    query: str | None,
-    location_term: str | None,
-    company_filter: str | None,
-    experience_level: str | None,
+    remaining_slots: int, query: str | None, home_location: str | None,
+    company_filter: str | None, experience_level: str | None,
 ) -> list[dict]:
     if company_filter:
-        # scrape only the matching company/companies, ignore ATS balancing
         matches = [(slug, ats) for slug, ats in VERIFIED_COMPANIES if company_filter.lower() in slug.lower()]
         if not matches:
-            return []  # company not in our static list — DDGS/html_parse path handles it instead
+            return []
         jobs = []
         for slug, ats in matches:
             fetcher = ATS_FETCHERS.get(ats)
             if not fetcher:
                 continue
             found = await fetcher(slug)
-            if location_term:
-                found = [j for j in found if location_matches(j.get("location"), location_term)]
+            print(f"FETCHED {len(found)} from {slug} ({ats})")
+            if home_location:
+                found = [j for j in found if location_matches_strict(j.get("location"), home_location)]
             if experience_level:
                 found = [j for j in found if detect_seniority(j.get("title", ""), j.get("description", "")) == experience_level]
             for j in found:
@@ -121,7 +110,6 @@ async def _fetch_static_company_jobs(
             jobs.extend(found)
         return jobs[:remaining_slots]
 
-    # no company filter — existing per-ATS balanced logic
     ats_list = list(_COMPANIES_BY_ATS.keys())
     per_ats_target = remaining_slots // len(ats_list) if ats_list else 0
 
@@ -133,8 +121,8 @@ async def _fetch_static_company_jobs(
         ats_jobs = []
         for slug in _COMPANIES_BY_ATS[ats]:
             found = await fetcher(slug)
-            if location_term:
-                found = [j for j in found if location_matches(j.get("location"), location_term)]
+            if home_location:
+                found = [j for j in found if location_matches_strict(j.get("location"), home_location)]
             if experience_level:
                 found = [j for j in found if detect_seniority(j.get("title", ""), j.get("description", "")) == experience_level]
             capped = found[:MAX_JOBS_PER_COMPANY]
@@ -151,34 +139,9 @@ async def _fetch_static_company_jobs(
     query_vector = embed_query(query)
     titles = [j["title"] for j in jobs]
     title_vectors = embed_texts(titles)
-
     scored = [(j, _cosine_sim(query_vector, tv)) for j, tv in zip(jobs, title_vectors)]
     scored.sort(key=lambda x: x[1], reverse=True)
     return [j for j, _ in scored[:remaining_slots]]
-
-
-async def _fetch_general_jobs(role_query: str, needed: int, location_term: str | None, company_filter: str | None, experience_level: str | None) -> list[dict]:
-    parts = [role_query]
-    if company_filter:
-        parts.append(company_filter)
-    if location_term:
-        parts.append(location_term)
-    if experience_level:
-        parts.append(experience_level)
-    search_term = " ".join(parts)
-
-    jobs = search_jobs_ddgs(search_term, max_results=needed * 2)
-    if not jobs:
-        relaxed = relax_query(search_term)
-        if relaxed != search_term:
-            jobs = search_jobs_ddgs(relaxed, max_results=needed * 2)
-
-    remaining = needed - len(jobs)
-    if remaining > 0:
-        jobs += await _fetch_html_parse_jobs(search_term, remaining)
-
-    return jobs[:needed]
-
 
 async def _insert_jobs(
     user_id: uuid.UUID,
@@ -246,25 +209,15 @@ async def _run_refresh(user_id: uuid.UUID, task_id: str, query: str | None):
                 await _set_task_status(task_id, "done", {"inserted": 0, "reason": "board_full"})
                 return
 
-            filters = await extract_query_filters(query) if query else {"role": query, "company": None, "location": None, "experience_level": None}
-            print(f"QUERY_EXTRACT RESULT: {filters}")
+            user = await db.get(User, user_id)
+            home_location = user.home_location if user else None
+
+            filters = await extract_query_filters(query) if query else {"role": query, "company": None, "experience_level": None}
             role_query_text = filters["role"]
-            location_term = filters["location"]
             company_filter = filters["company"]
             experience_level = filters["experience_level"]
 
-            static_cap = n_slots // 2
-            ddgs_reserved = n_slots - static_cap
-
-            static_jobs = await _fetch_static_company_jobs(static_cap, role_query_text, location_term, company_filter, experience_level)
-            remaining = n_slots - len(static_jobs)
-
-            general_jobs = []
-            if remaining > 0:
-                role_query = role_query_text or "software engineer"
-                general_jobs = await _fetch_general_jobs(role_query, remaining, location_term, company_filter, experience_level)
-
-            all_jobs = static_jobs + general_jobs
+            all_jobs = await _fetch_static_company_jobs(n_slots, role_query_text, home_location, company_filter, experience_level)
 
             batch_resume_id = None
             if role_query_text:

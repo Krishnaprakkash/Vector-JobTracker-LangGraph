@@ -15,8 +15,8 @@ KNOWN_LOCATIONS = [
 _SORTED_LOCATIONS = sorted(KNOWN_LOCATIONS, key=len, reverse=True)
 
 
-def location_matches(job_location: str | None, target: str) -> bool:
-    """True if job_location contains target, or job_location is missing (pass-through)."""
+def location_matches_strict(job_location: str | None, target: str) -> bool:
+    """Strict: excludes jobs with missing/unmatched location. No pass-through for unknowns."""
     if not job_location:
-        return True  # unknown location — don't exclude, just can't confirm match
+        return False
     return target.lower() in job_location.lower()
