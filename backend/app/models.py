@@ -24,13 +24,21 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    email: Mapped[str] = mapped_column(String, unique=True, index=True)
+    email: Mapped[str | None] = mapped_column(String, unique=True, index=True, nullable=True)
     last_search_query: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     resumes: Mapped[list["Resume"]] = relationship(back_populates="user")
     jobs: Mapped[list["Job"]] = relationship(back_populates="user")
     home_location: Mapped[str | None] = mapped_column(String, nullable=True)
+    experience_level: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    notion_workspace_id: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
+    notion_access_token: Mapped[str | None] = mapped_column(String, nullable=True)
+    notion_bot_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    notion_jobs_db_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    notion_resumes_db_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    notion_settings_db_id: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class Resume(Base):
