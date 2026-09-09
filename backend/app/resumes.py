@@ -8,7 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
 from .db import get_db
-from .models import Resume, ResumeChunk
+from .auth import get_current_user
+from .models import Resume, ResumeChunk, User
 from .resume_parser import extract_resume_text
 from .chunking import chunk_resume_text
 from .embeddings import embed_texts
@@ -33,8 +34,8 @@ def _build_summary(chunks: list[dict]) -> str | None:
 
 @router.post("/upload")
 async def upload_resume(
-    user_id: uuid.UUID,
     file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     if file.content_type != "application/pdf":
@@ -59,7 +60,7 @@ async def upload_resume(
         embeddings = embed_texts([c["content"] for c in chunks])
         summary = _build_summary(chunks)
 
-        resume = Resume(id=resume_id, user_id=user_id, filename=file.filename, summary=summary)
+        resume = Resume(id=resume_id, user_id=user.id, filename=file.filename, summary=summary)
         db.add(resume)
         await db.flush()
 
@@ -82,9 +83,9 @@ async def upload_resume(
 
 
 @router.get("/{resume_id}/file")
-async def get_resume_file(resume_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def get_resume_file(resume_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     resume = await db.get(Resume, resume_id)
-    if not resume:
+    if not resume or resume.user_id != user.id:
         raise HTTPException(404, "Resume not found")
     path = _resume_path(resume_id)
     if not os.path.exists(path):
@@ -93,9 +94,9 @@ async def get_resume_file(resume_id: uuid.UUID, db: AsyncSession = Depends(get_d
 
 
 @router.delete("/{resume_id}")
-async def delete_resume(resume_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def delete_resume(resume_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     resume = await db.get(Resume, resume_id)
-    if not resume:
+    if not resume or resume.user_id != user.id:
         raise HTTPException(404, "Resume not found")
     await db.delete(resume)
     await db.commit()
@@ -105,7 +106,7 @@ async def delete_resume(resume_id: uuid.UUID, db: AsyncSession = Depends(get_db)
     return {"status": "deleted"}
 
 @router.get("")
-async def list_resumes(user_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Resume).where(Resume.user_id == user_id).order_by(Resume.created_at.desc()))
+async def list_resumes(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Resume).where(Resume.user_id == user.id).order_by(Resume.created_at.desc()))
     resumes = result.scalars().all()
     return [{"id": r.id, "filename": r.filename, "created_at": r.created_at.isoformat()} for r in resumes]

@@ -17,3 +17,4 @@ torch==2.4.1
 groq==1.6.0
 ddgs==9.0.0
 numpy==2.5.2
+beautifulsoup4==4.15.0

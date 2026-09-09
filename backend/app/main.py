@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os
 
-from . import resumes, users, jobs, cover_letters
+from . import resumes, users, jobs
 
 app = FastAPI(title=os.getenv("APP_NAME", "Vector"))
 
@@ -22,4 +22,3 @@ async def health():
 app.include_router(resumes.router)
 app.include_router(users.router)
 app.include_router(jobs.router)
-app.include_router(cover_letters.router)

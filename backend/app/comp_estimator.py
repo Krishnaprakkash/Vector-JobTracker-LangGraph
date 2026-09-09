@@ -109,7 +109,7 @@ async def resolve_compensation(job: dict) -> dict:
     title = job.get("title", "")
     location = job.get("location", "") or "Remote"
     description = job.get("description", "")
-    seniority = detect_seniority(title, description)
+    seniority = detect_seniority(title, description) or "Mid"
 
     cached = await get_cached_comp(title, location, seniority)
     if cached:

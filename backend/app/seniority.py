@@ -27,7 +27,7 @@ def _bucket_from_years(min_years: int) -> str:
     return "Staff"
 
 
-def detect_seniority(title: str, description: str = "") -> str:
+def detect_seniority(title: str, description: str = "") -> str | None:
     title_lower = title.lower()
     for pattern, label in TITLE_LEVEL_PATTERNS:
         if re.search(pattern, title_lower):
@@ -38,4 +38,4 @@ def detect_seniority(title: str, description: str = "") -> str:
         min_years = int(match.group(1))
         return _bucket_from_years(min_years)
 
-    return "Mid"
+    return None

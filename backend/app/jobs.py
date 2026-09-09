@@ -1,7 +1,5 @@
 import uuid
 import json
-import re
-import httpx
 import numpy as np
 import redis.asyncio as aioredis
 
@@ -10,8 +8,11 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from collections import defaultdict
 
+from .manual_add import extract_jsonld_jobposting, tavily_search_summarize
+
 from .config import settings
 from .db import get_db, AsyncSessionLocal
+from .auth import get_current_user
 from .models import Job, JobStatus, User, Resume
 from .dedup import compute_job_hash
 from .comp_estimator import resolve_compensation
@@ -25,7 +26,6 @@ from .resume_matcher import select_resume_for_query, select_resume_for_job
 from .scoring import score_pending_jobs
 from .embeddings import embed_query, embed_texts
 from .location_filter import location_matches_strict
-from .query_extract import extract_query_filters
 from .seniority import detect_seniority
 
 
@@ -64,7 +64,6 @@ ATS_FETCHERS = {
     "workable": fetch_workable_jobs,
 }
 
-# Verified live via seed check — (slug, ats_source)
 VERIFIED_COMPANIES = [
     ("stripe", "greenhouse"), ("airbnb", "greenhouse"), ("coinbase", "greenhouse"),
     ("robinhood", "greenhouse"), ("instacart", "greenhouse"), ("asana", "greenhouse"),
@@ -87,29 +86,8 @@ for slug, ats in VERIFIED_COMPANIES:
 
 
 async def _fetch_static_company_jobs(
-    remaining_slots: int, query: str | None, home_location: str | None,
-    company_filter: str | None, experience_level: str | None,
+    remaining_slots: int, query: str | None, home_location: str | None, experience_level: str | None,
 ) -> list[dict]:
-    if company_filter:
-        matches = [(slug, ats) for slug, ats in VERIFIED_COMPANIES if company_filter.lower() in slug.lower()]
-        if not matches:
-            return []
-        jobs = []
-        for slug, ats in matches:
-            fetcher = ATS_FETCHERS.get(ats)
-            if not fetcher:
-                continue
-            found = await fetcher(slug)
-            print(f"FETCHED {len(found)} from {slug} ({ats})")
-            if home_location:
-                found = [j for j in found if location_matches_strict(j.get("location"), home_location)]
-            if experience_level:
-                found = [j for j in found if detect_seniority(j.get("title", ""), j.get("description", "")) == experience_level]
-            for j in found:
-                j["source"] = ats
-            jobs.extend(found)
-        return jobs[:remaining_slots]
-
     ats_list = list(_COMPANIES_BY_ATS.keys())
     per_ats_target = remaining_slots // len(ats_list) if ats_list else 0
 
@@ -124,7 +102,11 @@ async def _fetch_static_company_jobs(
             if home_location:
                 found = [j for j in found if location_matches_strict(j.get("location"), home_location)]
             if experience_level:
-                found = [j for j in found if detect_seniority(j.get("title", ""), j.get("description", "")) == experience_level]
+                found = [
+                    j for j in found
+                    if (detected := detect_seniority(j.get("title", ""), j.get("description", ""))) is None
+                    or detected == experience_level
+                ]
             capped = found[:MAX_JOBS_PER_COMPANY]
             for j in capped:
                 j["source"] = ats
@@ -147,7 +129,7 @@ async def _insert_jobs(
     user_id: uuid.UUID,
     db: AsyncSession,
     raw_jobs: list[dict],
-    batch_resume_id: uuid.UUID | None,  # set if query provided; None if blank-query (per-job selection)
+    batch_resume_id: uuid.UUID | None,
 ) -> int:
     inserted = 0
     for j in raw_jobs:
@@ -211,17 +193,14 @@ async def _run_refresh(user_id: uuid.UUID, task_id: str, query: str | None):
 
             user = await db.get(User, user_id)
             home_location = user.home_location if user else None
+            experience_level = user.experience_level if user else None
 
-            filters = await extract_query_filters(query) if query else {"role": query, "company": None, "experience_level": None}
-            role_query_text = filters["role"]
-            company_filter = filters["company"]
-            experience_level = filters["experience_level"]
-
-            all_jobs = await _fetch_static_company_jobs(n_slots, role_query_text, home_location, company_filter, experience_level)
+            all_jobs = await _fetch_static_company_jobs(n_slots, query, home_location, experience_level)
+            print(f"REAL RUN: fetched {len(all_jobs)} jobs")
 
             batch_resume_id = None
-            if role_query_text:
-                batch_resume_id = await select_resume_for_query(db, user_id, role_query_text)
+            if query:
+                batch_resume_id = await select_resume_for_query(db, user_id, query)
 
             inserted = await _insert_jobs(user_id, db, all_jobs, batch_resume_id)
 
@@ -250,20 +229,16 @@ async def _run_clear(user_id: uuid.UUID, task_id: str, query: str | None):
 
 
 @router.post("/clear")
-async def clear_jobs(user_id: uuid.UUID, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
-    user = await db.get(User, user_id)
-    if not user:
-        raise HTTPException(404, "User not found")
-
+async def clear_jobs(background_tasks: BackgroundTasks, user: User = Depends(get_current_user)):
     task_id = str(uuid.uuid4())
     await _set_task_status(task_id, "queued")
-    background_tasks.add_task(_run_clear, user_id, task_id, user.last_search_query)
+    background_tasks.add_task(_run_clear, user.id, task_id, user.last_search_query)
     return {"task_id": task_id, "status": "queued"}
 
 @router.patch("/{job_id}/status")
-async def update_job_status(job_id: uuid.UUID, user_id: uuid.UUID, status: str, db: AsyncSession = Depends(get_db)):
+async def update_job_status(job_id: uuid.UUID, status: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     job = await db.get(Job, job_id)
-    if not job or job.user_id != user_id:
+    if not job or job.user_id != user.id:
         raise HTTPException(404, "Job not found")
 
     try:
@@ -277,9 +252,9 @@ async def update_job_status(job_id: uuid.UUID, user_id: uuid.UUID, status: str, 
 
 
 @router.delete("/{job_id}")
-async def delete_job(job_id: uuid.UUID, user_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def delete_job(job_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     job = await db.get(Job, job_id)
-    if not job or job.user_id != user_id:
+    if not job or job.user_id != user.id:
         raise HTTPException(404, "Job not found")
     await db.delete(job)
     await db.commit()
@@ -287,7 +262,7 @@ async def delete_job(job_id: uuid.UUID, user_id: uuid.UUID, db: AsyncSession = D
 
 
 @router.get("/status/{task_id}")
-async def get_task_status(task_id: str):
+async def get_task_status(task_id: str, user: User = Depends(get_current_user)):
     r = _get_redis()
     raw = await r.get(f"task:{task_id}")
     if not raw:
@@ -295,9 +270,9 @@ async def get_task_status(task_id: str):
     return json.loads(raw)
 
 @router.get("")
-async def list_jobs(user_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def list_jobs(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(Job).where(Job.user_id == user_id, Job.status == JobStatus.browsing).order_by(Job.created_at)
+        select(Job).where(Job.user_id == user.id, Job.status == JobStatus.browsing).order_by(Job.created_at)
     )
     jobs = result.scalars().all()
     return [
@@ -319,53 +294,60 @@ async def list_jobs(user_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         for j in jobs
     ]
 
-def _strip_html(html: str) -> str:
-    text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-
-async def _resolve_description(raw_input: str) -> str:
-    if raw_input.strip().startswith(("http://", "https://")):
-        try:
-            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-                resp = await client.get(raw_input.strip())
-            resp.raise_for_status()
-            return _strip_html(resp.text)[:5000]
-        except Exception:
-            return ""  # best-effort — failed fetch just means empty description, not a hard error
-    return raw_input.strip()[:5000]
-
 
 @router.post("/manual")
 async def add_manual_job(
-    user_id: uuid.UUID,
     company: str,
     title: str,
     location: str,
     resume_id: uuid.UUID,
-    raw_input: str,  # URL or pasted text
+    raw_input: str | None = None,
+    years_experience: int | None = None,
     comp_min: int | None = None,
     comp_max: int | None = None,
     comp_currency: str | None = None,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     resume = await db.get(Resume, resume_id)
-    if not resume or resume.user_id != user_id:
+    if not resume or resume.user_id != user.id:
         raise HTTPException(404, "Resume not found")
 
-    description = await _resolve_description(raw_input)
-    dedup_key = f"manual-{uuid.uuid4()}"  # exempted from real dedup, but column is NOT NULL so needs a value
+    company = company.strip()
+    title = title.strip()
+    location = location.strip() or None
+    url = None
+    description = None
+
+    if raw_input and raw_input.strip().startswith(("http://", "https://")):
+        url = raw_input.strip()
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                resp = await client.get(url)
+            resp.raise_for_status()
+            parsed = extract_jsonld_jobposting(resp.text)
+        except Exception:
+            parsed = None
+
+        if parsed:
+            title = title or parsed.get("title") or title
+            company = company or parsed.get("company") or company
+            location = location or parsed.get("location")
+            description = parsed.get("description")
+
+    if not description:
+        description = await tavily_search_summarize(title, company, years_experience)
+
+    dedup_key = f"manual-{uuid.uuid4()}"
 
     job = Job(
-        user_id=user_id,
+        user_id=user.id,
         resume_id=resume_id,
-        company=company.strip(),
-        title=title.strip(),
-        location=location.strip() or None,
-        url=raw_input.strip() if raw_input.strip().startswith(("http://", "https://")) else None,
+        company=company,
+        title=title,
+        location=location,
+        url=url,
         description=description or None,
         source="manual",
         dedup_hash=dedup_key,
@@ -381,9 +363,9 @@ async def add_manual_job(
     return {"id": job.id, "company": job.company, "title": job.title, "status": job.status.value}
 
 @router.get("/tracked")
-async def list_tracked_jobs(user_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def list_tracked_jobs(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(Job).where(Job.user_id == user_id, Job.status.in_(TRACKER_STATUSES)).order_by(Job.updated_at.desc())
+        select(Job).where(Job.user_id == user.id, Job.status.in_(TRACKER_STATUSES)).order_by(Job.updated_at.desc())
     )
     jobs = result.scalars().all()
     return [
