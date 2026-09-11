@@ -12,6 +12,7 @@ from .config import settings
 from .db import get_db
 from .auth import create_session, set_session_cookie
 from .models import User
+from .notion_setup import run_notion_setup
 
 router = APIRouter(prefix="/api/notion", tags=["notion"])
 
@@ -101,5 +102,6 @@ async def notion_callback(
     session_token = await create_session(user.id)
     set_session_cookie(response, session_token)
 
-    needs_setup = user.notion_jobs_db_id is None
-    return {"status": "connected", "user_id": user.id, "needs_setup": needs_setup}
+    setup_result = await run_notion_setup(user, db)
+
+    return {"status": "connected", "user_id": user.id, "setup": setup_result}

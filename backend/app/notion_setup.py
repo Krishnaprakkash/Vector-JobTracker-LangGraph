@@ -96,11 +96,7 @@ def _settings_db_properties() -> dict:
     }
 
 
-@router.post("/setup")
-async def notion_setup(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    if not user.notion_access_token:
-        raise HTTPException(400, "Notion not connected for this user")
-
+async def run_notion_setup(user: User, db: AsyncSession) -> dict:
     if user.notion_jobs_db_id:
         return {
             "status": "already_set_up",
@@ -127,3 +123,10 @@ async def notion_setup(user: User = Depends(get_current_user), db: AsyncSession 
         "resumes_db_id": resumes_db_id,
         "settings_db_id": settings_db_id,
     }
+
+
+@router.post("/setup")
+async def notion_setup(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    if not user.notion_access_token:
+        raise HTTPException(400, "Notion not connected for this user")
+    return await run_notion_setup(user, db)

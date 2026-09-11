@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import uuid
 import asyncio
+import os
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Request, HTTPException
@@ -9,7 +10,11 @@ from sqlalchemy import select, func
 
 from .config import settings
 from .db import AsyncSessionLocal
-from .models import Job, User, Resume
+from .models import Job, User, Resume, JobStatus, ResumeChunk
+from .resumes import _resume_path, _build_summary
+from .resume_parser import extract_resume_text
+from .chunking import chunk_resume_text
+from .embeddings import embed_texts
 from .manual_add import extract_jsonld_jobposting, enrich_manual_job, tavily_search_summarize
 
 router = APIRouter(prefix="/api/notion-webhook", tags=["notion"])
@@ -91,6 +96,10 @@ async def _handle_job_created(user: User, page: dict) -> None:
         return  # nothing usable yet; user still typing
 
     async with AsyncSessionLocal() as db:
+        existing = await db.execute(select(Job.id).where(Job.notion_page_id == page["id"]))
+        if existing.scalar_one_or_none():
+            return  # page created via our own API sync, not a genuine user-created row
+
         resume_id = await _resolve_resume_id(db, user.id, resume_page_id)
         if resume_page_id and not resume_id:
             await asyncio.sleep(3)
@@ -141,6 +150,60 @@ async def _handle_job_created(user: User, page: dict) -> None:
         await db.commit()
 
     await _sync_enriched_fields_to_notion(user.notion_access_token, page["id"], location, description, enrichment)
+
+
+async def _handle_resume_created(user: User, page: dict) -> None:
+    props = page.get("properties", {})
+    files = props.get("File", {}).get("files", [])
+
+    if not files:
+        await asyncio.sleep(3)
+        page = await _fetch_page(user.notion_access_token, page["id"])
+        files = page.get("properties", {}).get("File", {}).get("files", [])
+
+    if not files:
+        return  # accepted gap: no file attached
+
+    file_info = files[0]
+    file_url = (file_info.get("file") or file_info.get("external") or {}).get("url")
+    filename = file_info.get("name", "resume.pdf")
+
+    if not file_url or not filename.lower().endswith(".pdf"):
+        return
+
+    resume_id = uuid.uuid4()
+    file_path = _resume_path(resume_id)
+
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        resp = await client.get(file_url)
+    resp.raise_for_status()
+
+    with open(file_path, "wb") as f:
+        f.write(resp.content)
+
+    async with AsyncSessionLocal() as db:
+        try:
+            text = extract_resume_text(file_path)
+            if not text:
+                return
+            chunks = chunk_resume_text(text)
+            if not chunks:
+                return
+            embeddings = embed_texts([c["content"] for c in chunks])
+            summary = _build_summary(chunks)
+
+            resume = Resume(id=resume_id, user_id=user.id, filename=filename, summary=summary, notion_page_id=page["id"])
+            db.add(resume)
+            await db.flush()
+
+            for chunk, vector in zip(chunks, embeddings):
+                db.add(ResumeChunk(resume_id=resume.id, section=chunk["section"], content=chunk["content"], embedding=vector))
+
+            await db.commit()
+        except Exception:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            raise
 
 
 async def _fetch_page(token: str, page_id: str) -> dict:
@@ -210,9 +273,6 @@ async def _handle_job_status_change(user: User, page: dict) -> None:
 
 @router.post("")
 async def notion_webhook(request: Request, background_tasks: BackgroundTasks):
-    event_type = payload.get("type")
-    if event_type not in ("page.created", "page.properties_updated", "page.deleted"):
-        return {"status": "ignored"}
     raw_body = await request.body()
     payload = await request.json()
 
@@ -222,6 +282,10 @@ async def notion_webhook(request: Request, background_tasks: BackgroundTasks):
 
     if not _verify_signature(raw_body, request.headers.get("X-Notion-Signature")):
         raise HTTPException(401, "Invalid signature")
+
+    event_type = payload.get("type")
+    if event_type not in ("page.created", "page.properties_updated", "page.deleted"):
+        return {"status": "ignored"}
 
     workspace_id = payload.get("workspace_id")
     entity = payload.get("entity", {})
@@ -260,5 +324,6 @@ async def notion_webhook(request: Request, background_tasks: BackgroundTasks):
         else:
             await _handle_job_status_change(user, page)
     elif parent_db_id == user.notion_resumes_db_id:
-        pass  # item 14, not yet built
+        if event_type == "page.created":
+            background_tasks.add_task(_handle_resume_created, user, page)
     return {"status": "ok"}
