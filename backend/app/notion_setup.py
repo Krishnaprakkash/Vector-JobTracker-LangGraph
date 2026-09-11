@@ -60,7 +60,7 @@ async def _create_database(token: str, parent_page_id: str, title: str, properti
     return resp.json()["id"]
 
 
-def _jobs_db_properties() -> dict:
+def _jobs_db_properties(resumes_db_id: str) -> dict:
     return {
         "Title": {"title": {}},
         "Company": {"rich_text": {}},
@@ -70,11 +70,13 @@ def _jobs_db_properties() -> dict:
         "Comp Currency": {"select": {"options": [{"name": c} for c in ["USD", "EUR", "GBP", "INR"]]}},
         "Match Score": {"number": {}},
         "Match Rationale": {"rich_text": {}},
+        "Fit": {"select": {"options": [{"name": f} for f in ["Reasonable", "Moderate", "Aspirational"]]}},
         "Source": {"select": {"options": [
             {"name": s} for s in ["greenhouse", "lever", "ashby", "smartrecruiters", "recruitee", "workable", "manual"]
         ]}},
         "URL": {"url": {}},
         "Status": {"select": {"options": [{"name": s} for s in JOB_STATUS_OPTIONS]}},
+        "Resume": {"relation": {"database_id": resumes_db_id, "single_property": {}}},
     }
 
 
@@ -90,6 +92,7 @@ def _settings_db_properties() -> dict:
     return {
         "Name": {"title": {}},
         "Refresh Trigger": {"checkbox": {}},
+        "Status Message": {"rich_text": {}},
     }
 
 
@@ -109,8 +112,8 @@ async def notion_setup(user: User = Depends(get_current_user), db: AsyncSession 
     token = user.notion_access_token
     parent_page_id = await _find_parent_page(token)
 
-    jobs_db_id = await _create_database(token, parent_page_id, "Jobs", _jobs_db_properties())
     resumes_db_id = await _create_database(token, parent_page_id, "Resumes", _resumes_db_properties())
+    jobs_db_id = await _create_database(token, parent_page_id, "Jobs", _jobs_db_properties(resumes_db_id))
     settings_db_id = await _create_database(token, parent_page_id, "Settings", _settings_db_properties())
 
     user.notion_jobs_db_id = jobs_db_id

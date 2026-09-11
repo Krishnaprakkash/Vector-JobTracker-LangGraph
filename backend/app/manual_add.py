@@ -6,6 +6,8 @@ from bs4 import BeautifulSoup
 
 from .rate_limiter import route_call
 from .tavily_search import tavily_search
+from .comp_estimator import resolve_compensation
+from .scoring import extract_job_requirements, score_job_fit, _get_top_resume_chunks
 
 
 def _strip_html(html: str) -> str:
@@ -86,3 +88,34 @@ async def tavily_search_summarize(title: str, company: str, years_experience: in
     if result["status"] != "ok":
         return ""
     return result["content"].strip()[:2000]
+
+
+async def enrich_manual_job(
+    db,
+    title: str,
+    location: str | None,
+    description: str | None,
+    resume_id,
+    comp_min: int | None,
+    comp_max: int | None,
+) -> dict:
+    """Comp estimation + fit scoring for manually/Notion-added jobs.
+    Returns a dict of fields to merge into the Job row; empty keys are simply omitted."""
+    result = {}
+
+    if comp_min is None and comp_max is None:
+        comp = await resolve_compensation({"title": title, "location": location, "description": description})
+        result["comp_min"] = comp.get("comp_min")
+        result["comp_max"] = comp.get("comp_max")
+        result["comp_currency"] = comp.get("comp_currency")
+        result["comp_estimated"] = comp.get("comp_estimated", True)
+
+    if description and resume_id:
+        extracted = await extract_job_requirements(description)
+        resume_chunks = await _get_top_resume_chunks(db, resume_id, description)
+        score_result = await score_job_fit(title, description, extracted, resume_chunks)
+        if score_result:
+            result["match_score"] = score_result["match_score"]
+            result["match_rationale"] = score_result["match_rationale"]
+
+    return result

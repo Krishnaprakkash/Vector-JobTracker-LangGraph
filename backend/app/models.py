@@ -53,6 +53,8 @@ class Resume(Base):
     user: Mapped["User"] = relationship(back_populates="resumes")
     chunks: Mapped[list["ResumeChunk"]] = relationship(back_populates="resume", cascade="all, delete-orphan")
 
+    notion_page_id: Mapped[str | None] = mapped_column(String, nullable=True)
+
 
 class ResumeChunk(Base):
     __tablename__ = "resume_chunks"
@@ -92,6 +94,8 @@ class Job(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    notion_page_id: Mapped[str | None] = mapped_column(String, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="jobs")
     __table_args__ = (UniqueConstraint("user_id", "dedup_hash", name="uq_user_dedup_hash"),)

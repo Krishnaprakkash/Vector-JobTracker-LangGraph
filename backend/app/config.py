@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     notion_client_id: str = ""
     notion_client_secret: str = ""
     notion_redirect_uri: str = "http://localhost:8000/api/notion/callback"
+    notion_webhook_secret: str = ""
 
     model_config = SettingsConfigDict(env_file=ROOT_ENV, extra="ignore")
 

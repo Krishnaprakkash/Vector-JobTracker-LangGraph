@@ -8,7 +8,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from collections import defaultdict
 
-from .manual_add import extract_jsonld_jobposting, tavily_search_summarize
+from .manual_add import extract_jsonld_jobposting, tavily_search_summarize, enrich_manual_job
 
 from .config import settings
 from .db import get_db, AsyncSessionLocal
@@ -16,6 +16,7 @@ from .auth import get_current_user
 from .models import Job, JobStatus, User, Resume
 from .dedup import compute_job_hash
 from .comp_estimator import resolve_compensation
+from .notion_sync import sync_job_to_notion
 from .scrapers.greenhouse import fetch_greenhouse_jobs
 from .scrapers.lever import fetch_lever_jobs
 from .scrapers.ashby import fetch_ashby_jobs
@@ -31,7 +32,7 @@ from .seniority import detect_seniority
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
-MAX_SLOTS = 70
+MAX_SLOTS = 30
 MAX_JOBS_PER_COMPANY = 5
 _redis: aioredis.Redis | None = None
 
@@ -206,10 +207,20 @@ async def _run_refresh(user_id: uuid.UUID, task_id: str, query: str | None):
 
             score_summary = await score_pending_jobs(db, user_id)
 
+            synced = 0
+            if user and user.notion_access_token and user.notion_jobs_db_id:
+                board_result = await db.execute(
+                    select(Job).where(Job.user_id == user_id, Job.status == JobStatus.browsing)
+                )
+                for j in board_result.scalars().all():
+                    if await sync_job_to_notion(db, j, user):
+                        synced += 1
+
             await _set_task_status(task_id, "done", {
                 "inserted": inserted,
                 "scored": score_summary["scored"],
                 "failed": score_summary["failed"],
+                "notion_synced": synced,
             })
         except Exception as e:
             await _set_task_status(task_id, "failed", {"error": str(e)})
@@ -341,6 +352,8 @@ async def add_manual_job(
 
     dedup_key = f"manual-{uuid.uuid4()}"
 
+    enrichment = await enrich_manual_job(db, title, location, description, resume_id, comp_min, comp_max)
+
     job = Job(
         user_id=user.id,
         resume_id=resume_id,
@@ -352,14 +365,20 @@ async def add_manual_job(
         source="manual",
         dedup_hash=dedup_key,
         status=JobStatus.applied,
-        comp_min=comp_min,
-        comp_max=comp_max,
-        comp_currency=comp_currency,
-        comp_estimated=False,
+        comp_min=enrichment.get("comp_min", comp_min),
+        comp_max=enrichment.get("comp_max", comp_max),
+        comp_currency=enrichment.get("comp_currency", comp_currency),
+        comp_estimated=enrichment.get("comp_estimated", False),
+        match_score=enrichment.get("match_score"),
+        match_rationale=enrichment.get("match_rationale"),
     )
     db.add(job)
     await db.commit()
     await db.refresh(job)
+
+    if user.notion_access_token and user.notion_jobs_db_id:
+        await sync_job_to_notion(db, job, user)
+
     return {"id": job.id, "company": job.company, "title": job.title, "status": job.status.value}
 
 @router.get("/tracked")
