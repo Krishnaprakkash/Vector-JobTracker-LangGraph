@@ -5,7 +5,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import Job, JobStatus, ResumeChunk
+from .models import Job, JobStatus
 from .rate_limiter import route_call
 from .embeddings import embed_query
 

@@ -7,8 +7,10 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODELS = {
     "extract": "qwen/qwen3.6-27b",
     "score_reason": "qwen/qwen3.8-27b",
-    "comp": "openai/gpt-oss-20b",   
+    "comp": "openai/gpt-oss-20b",
     "resume_optimize": "openai/gpt-oss-120b",
+    "resume_review": "allam-2-7b",
+    "resume_verify": "allam-2-7b",
 }
 
 class GroqError(Exception):
