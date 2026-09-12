@@ -93,6 +93,7 @@ def _settings_db_properties() -> dict:
         "Name": {"title": {}},
         "Refresh Trigger": {"checkbox": {}},
         "Status Message": {"rich_text": {}},
+        "Search Query": {"rich_text": {}},
     }
 
 

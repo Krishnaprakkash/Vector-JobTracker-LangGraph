@@ -54,7 +54,7 @@ async def _resolve_resume_id(db, user_id, resume_notion_page_id: str | None):
     )
     return result.scalar_one_or_none()
 
-async def _sync_enriched_fields_to_notion(token: str, page_id: str, location: str | None, description: str | None, enrichment: dict) -> None:
+async def _sync_enriched_fields_to_notion(token: str, page_id: str, location: str | None, description: str | None, enrichment: dict, status: str | None = None, source: str | None = None) -> None:
     from .fit import fit_label
 
     properties = {}
@@ -73,6 +73,10 @@ async def _sync_enriched_fields_to_notion(token: str, page_id: str, location: st
             properties["Fit"] = {"select": {"name": label}}
     if enrichment.get("match_rationale"):
         properties["Match Rationale"] = {"rich_text": [{"text": {"content": enrichment["match_rationale"][:2000]}}]}
+    if status:
+        properties["Status"] = {"select": {"name": status}}
+    if source:
+        properties["Source"] = {"select": {"name": source}}
 
     if not properties:
         return
@@ -149,7 +153,7 @@ async def _handle_job_created(user: User, page: dict) -> None:
         db.add(job)
         await db.commit()
 
-    await _sync_enriched_fields_to_notion(user.notion_access_token, page["id"], location, description, enrichment)
+    await _sync_enriched_fields_to_notion(user.notion_access_token, page["id"], location, description, enrichment, status=job.status.value, source=job.source)
 
 
 async def _handle_resume_created(user: User, page: dict) -> None:
@@ -238,9 +242,15 @@ async def _handle_settings_change(user: User, page: dict, background_tasks: Back
     if not trigger:
         return
 
+    search_query = _extract_rich_text(page.get("properties", {}).get("Search Query")).strip() or None
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(func.count()).select_from(Resume).where(Resume.user_id == user.id))
         resume_count = result.scalar_one()
+
+        db_user = await db.get(User, user.id)
+        db_user.last_search_query = search_query
+        await db.commit()
 
     if resume_count == 0:
         await _write_status_message(user.notion_access_token, page["id"], "⚠️ Upload a resume first")
@@ -250,7 +260,7 @@ async def _handle_settings_change(user: User, page: dict, background_tasks: Back
     await _write_status_message(user.notion_access_token, page["id"], "")
     task_id = str(uuid.uuid4())
     await _set_task_status(task_id, "queued")
-    background_tasks.add_task(_run_refresh, user.id, task_id, user.last_search_query)
+    background_tasks.add_task(_run_refresh, user.id, task_id, search_query)
     await _reset_checkbox(user.notion_access_token, page["id"], "Refresh Trigger")
 
 
