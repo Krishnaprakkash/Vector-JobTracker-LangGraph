@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 from .rate_limiter import route_call
 from .tavily_search import tavily_search
 from .comp_estimator import resolve_compensation
-from .scoring import extract_job_requirements, score_job_fit, _get_top_resume_chunks
+from .scoring import extract_job_requirements, score_job_fit, _get_top_profile_chunks
 
 
 def _strip_html(html: str) -> str:
@@ -92,10 +92,10 @@ async def tavily_search_summarize(title: str, company: str, years_experience: in
 
 async def enrich_manual_job(
     db,
+    user_id,
     title: str,
     location: str | None,
     description: str | None,
-    resume_id,
     comp_min: int | None,
     comp_max: int | None,
 ) -> dict:
@@ -110,10 +110,10 @@ async def enrich_manual_job(
         result["comp_currency"] = comp.get("comp_currency")
         result["comp_estimated"] = comp.get("comp_estimated", True)
 
-    if description and resume_id:
+    if description:
         extracted = await extract_job_requirements(description)
-        resume_chunks = await _get_top_resume_chunks(db, resume_id, description)
-        score_result = await score_job_fit(title, description, extracted, resume_chunks)
+        profile_chunks = await _get_top_profile_chunks(db, user_id, description)
+        score_result = await score_job_fit(title, description, extracted, profile_chunks)
         if score_result:
             result["match_score"] = score_result["match_score"]
             result["match_rationale"] = score_result["match_rationale"]

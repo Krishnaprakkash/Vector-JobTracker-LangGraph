@@ -13,7 +13,7 @@ from .manual_add import extract_jsonld_jobposting, tavily_search_summarize, enri
 from .config import settings
 from .db import get_db, AsyncSessionLocal
 from .auth import get_current_user
-from .models import Job, JobStatus, User, Resume
+from .models import Job, JobStatus, User
 from .dedup import compute_job_hash
 from .comp_estimator import resolve_compensation
 from .notion_sync import sync_job_to_notion
@@ -23,7 +23,6 @@ from .scrapers.ashby import fetch_ashby_jobs
 from .scrapers.smartrecruiters import fetch_smartrecruiters_jobs
 from .scrapers.recruitee import fetch_recruitee_jobs
 from .scrapers.workable import fetch_workable_jobs
-from .resume_matcher import select_resume_for_query, select_resume_for_job
 from .scoring import score_pending_jobs
 from .embeddings import embed_query, embed_texts
 from .location_filter import location_matches_strict
@@ -126,12 +125,7 @@ async def _fetch_static_company_jobs(
     scored.sort(key=lambda x: x[1], reverse=True)
     return [j for j, _ in scored[:remaining_slots]]
 
-async def _insert_jobs(
-    user_id: uuid.UUID,
-    db: AsyncSession,
-    raw_jobs: list[dict],
-    batch_resume_id: uuid.UUID | None,
-) -> int:
+async def _insert_jobs(user_id: uuid.UUID, db: AsyncSession, raw_jobs: list[dict]) -> int:
     inserted = 0
     for j in raw_jobs:
         company = j.get("company") or "unknown"
@@ -148,16 +142,8 @@ async def _insert_jobs(
 
         comp = await resolve_compensation(j)
 
-        resume_id = batch_resume_id
-        status = JobStatus.pending_scoring if resume_id else JobStatus.browsing
-        if resume_id is None:
-            resume_id = await select_resume_for_job(db, user_id, j.get("description", ""))
-            if resume_id:
-                status = JobStatus.pending_scoring
-
         db.add(Job(
             user_id=user_id,
-            resume_id=resume_id,
             company=company,
             title=title,
             url=j.get("url"),
@@ -165,7 +151,7 @@ async def _insert_jobs(
             location=j.get("location"),
             source=j.get("source", "ddgs"),
             dedup_hash=job_hash,
-            status=status,
+            status=JobStatus.pending_scoring,
             comp_min=comp.get("comp_min"),
             comp_max=comp.get("comp_max"),
             comp_currency=comp.get("comp_currency"),
@@ -199,16 +185,12 @@ async def _run_refresh(user_id: uuid.UUID, task_id: str, query: str | None):
             all_jobs = await _fetch_static_company_jobs(n_slots, query, home_location, experience_level)
             print(f"REAL RUN: fetched {len(all_jobs)} jobs")
 
-            batch_resume_id = None
-            if query:
-                batch_resume_id = await select_resume_for_query(db, user_id, query)
-
-            inserted = await _insert_jobs(user_id, db, all_jobs, batch_resume_id)
+            inserted = await _insert_jobs(user_id, db, all_jobs)
 
             score_summary = await score_pending_jobs(db, user_id)
 
             synced = 0
-            if user and user.notion_access_token and user.notion_jobs_db_id:
+            if user and user.notion_access_token and user.notion_jobs_data_source_id:
                 board_result = await db.execute(
                     select(Job).where(Job.user_id == user_id, Job.status == JobStatus.browsing)
                 )
@@ -311,7 +293,6 @@ async def add_manual_job(
     company: str,
     title: str,
     location: str,
-    resume_id: uuid.UUID,
     raw_input: str | None = None,
     years_experience: int | None = None,
     comp_min: int | None = None,
@@ -320,10 +301,6 @@ async def add_manual_job(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    resume = await db.get(Resume, resume_id)
-    if not resume or resume.user_id != user.id:
-        raise HTTPException(404, "Resume not found")
-
     company = company.strip()
     title = title.strip()
     location = location.strip() or None
@@ -352,11 +329,10 @@ async def add_manual_job(
 
     dedup_key = f"manual-{uuid.uuid4()}"
 
-    enrichment = await enrich_manual_job(db, title, location, description, resume_id, comp_min, comp_max)
+    enrichment = await enrich_manual_job(db, user.id, title, location, description, comp_min, comp_max)
 
     job = Job(
         user_id=user.id,
-        resume_id=resume_id,
         company=company,
         title=title,
         location=location,
@@ -376,7 +352,7 @@ async def add_manual_job(
     await db.commit()
     await db.refresh(job)
 
-    if user.notion_access_token and user.notion_jobs_db_id:
+    if user.notion_access_token and user.notion_jobs_data_source_id:
         await sync_job_to_notion(db, job, user)
 
     return {"id": job.id, "company": job.company, "title": job.title, "status": job.status.value}

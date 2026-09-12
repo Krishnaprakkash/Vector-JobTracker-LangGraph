@@ -5,7 +5,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import Job, JobStatus
+from .models import Job, JobStatus, Profile, ProfileChunk
 from .rate_limiter import route_call
 from .embeddings import embed_query
 
@@ -47,15 +47,16 @@ async def extract_job_requirements(description: str) -> dict | None:
         return None
 
 
-async def _get_top_resume_chunks(db: AsyncSession, resume_id: uuid.UUID, job_description: str) -> list[str]:
+async def _get_top_profile_chunks(db: AsyncSession, user_id: uuid.UUID, job_description: str) -> list[str]:
     if not job_description:
         return []
     query_vector = embed_query(job_description)
 
     stmt = (
-        select(ResumeChunk.content)
-        .where(ResumeChunk.resume_id == resume_id)
-        .order_by(ResumeChunk.embedding.cosine_distance(query_vector))
+        select(ProfileChunk.content)
+        .join(Profile, Profile.id == ProfileChunk.profile_id)
+        .where(Profile.user_id == user_id)
+        .order_by(ProfileChunk.embedding.cosine_distance(query_vector))
         .limit(TOP_K_CHUNKS)
     )
     result = await db.execute(stmt)
@@ -66,16 +67,16 @@ async def score_job_fit(
     job_title: str,
     job_description: str,
     extracted: dict | None,
-    resume_chunks: list[str],
+    profile_chunks: list[str],
 ) -> dict | None:
     requirements_text = json.dumps(extracted)[:1500] if extracted else "Not available"
-    resume_text = "\n---\n".join(c[:800] for c in resume_chunks) if resume_chunks else "No resume excerpts available"
+    profile_text = "\n---\n".join(c[:800] for c in profile_chunks) if profile_chunks else "No profile excerpts available"
 
     prompt = (
         f"Job Title: {job_title}\n"
         f"Job Description: {job_description[:2000]}\n\n"
         f"Extracted Requirements: {requirements_text}\n\n"
-        f"Relevant Resume Excerpts:\n{resume_text}"
+        f"Relevant Profile Excerpts:\n{profile_text}"
     )
     messages = [
         {"role": "system", "content": SCORE_SYSTEM_PROMPT},
@@ -109,14 +110,15 @@ async def score_pending_jobs(db: AsyncSession, user_id: uuid.UUID) -> dict:
     failed = 0
 
     for job in jobs:
-        if not job.resume_id:
+        profile_chunks = await _get_top_profile_chunks(db, user_id, job.description or "")
+
+        if not profile_chunks:
             job.status = JobStatus.scoring_failed
             failed += 1
             continue
 
         extracted = await extract_job_requirements(job.description or "")
-        resume_chunks = await _get_top_resume_chunks(db, job.resume_id, job.description or "")
-        score_result = await score_job_fit(job.title, job.description or "", extracted, resume_chunks)
+        score_result = await score_job_fit(job.title, job.description or "", extracted, profile_chunks)
 
         if score_result is None:
             job.status = JobStatus.scoring_failed

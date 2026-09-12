@@ -11,9 +11,6 @@ from sqlalchemy import select, func
 from .config import settings
 from .db import AsyncSessionLocal
 from .models import Job, User, Resume, JobStatus, Profile, ProfileItem, ProfileChunk, ProfileSection
-from .resumes import _resume_path, _build_summary
-from .resume_parser import extract_resume_text
-from .chunking import chunk_resume_text
 from .embeddings import embed_texts
 from .manual_add import extract_jsonld_jobposting, enrich_manual_job, tavily_search_summarize
 
@@ -203,7 +200,7 @@ async def _handle_job_created(user: User, page: dict) -> None:
         if not description:
             description = await tavily_search_summarize(title, company, None)
 
-        enrichment = await enrich_manual_job(db, title, location, description, None, None, None)
+        enrichment = await enrich_manual_job(db, user.id, title, location, description, None, None)
 
         dedup_key = f"notion-{page['id']}"
         job = Job(
