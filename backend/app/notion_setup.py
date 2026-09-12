@@ -9,7 +9,7 @@ from .models import User
 router = APIRouter(prefix="/api/notion", tags=["notion"])
 
 NOTION_API = "https://api.notion.com/v1"
-NOTION_VERSION = "2022-06-28"
+NOTION_VERSION = "2026-03-11"
 
 JOB_STATUS_OPTIONS = [
     "browsing", "pending_scoring", "saved", "applied",
@@ -47,20 +47,21 @@ async def _find_parent_page(token: str) -> str:
     return results[0]["id"]
 
 
-async def _create_database(token: str, parent_page_id: str, title: str, properties: dict) -> str:
+async def _create_database(token: str, parent_page_id: str, title: str, properties: dict) -> tuple[str, str]:
     payload = {
         "parent": {"type": "page_id", "page_id": parent_page_id},
         "title": [{"type": "text", "text": {"content": title}}],
-        "properties": properties,
+        "initial_data_source": {"properties": properties},
     }
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.post(f"{NOTION_API}/databases", headers=_headers(token), json=payload)
     if resp.status_code != 200:
         raise HTTPException(502, f"Notion database creation failed ({title}): {resp.text}")
-    return resp.json()["id"]
+    data = resp.json()
+    return data["id"], data["data_sources"][0]["id"]
 
 
-def _jobs_db_properties(resumes_db_id: str) -> dict:
+def _jobs_db_properties() -> dict:
     return {
         "Title": {"title": {}},
         "Company": {"rich_text": {}},
@@ -76,15 +77,25 @@ def _jobs_db_properties(resumes_db_id: str) -> dict:
         ]}},
         "URL": {"url": {}},
         "Status": {"select": {"options": [{"name": s} for s in JOB_STATUS_OPTIONS]}},
-        "Resume": {"relation": {"database_id": resumes_db_id, "single_property": {}}},
+        "Optimize Resume": {"checkbox": {}},
     }
 
 
-def _resumes_db_properties() -> dict:
+def _resumes_db_properties(jobs_data_source_id: str) -> dict:
     return {
         "Name": {"title": {}},
         "File": {"files": {}},
-        "Resume ID": {"rich_text": {}},
+        "Job": {"relation": {"data_source_id": jobs_data_source_id, "dual_property": {"synced_property_name": "Resume"}}},
+    }
+
+
+def _profile_db_properties() -> dict:
+    return {
+        "Title": {"title": {}},
+        "Section": {"select": {"options": [
+            {"name": s} for s in ["Skills", "Experience", "Education", "Projects", "Certifications"]
+        ]}},
+        "Details": {"rich_text": {}},
     }
 
 
@@ -104,18 +115,25 @@ async def run_notion_setup(user: User, db: AsyncSession) -> dict:
             "jobs_db_id": user.notion_jobs_db_id,
             "resumes_db_id": user.notion_resumes_db_id,
             "settings_db_id": user.notion_settings_db_id,
+            "profile_db_id": user.notion_profile_db_id,
         }
 
     token = user.notion_access_token
     parent_page_id = await _find_parent_page(token)
 
-    resumes_db_id = await _create_database(token, parent_page_id, "Resumes", _resumes_db_properties())
-    jobs_db_id = await _create_database(token, parent_page_id, "Jobs", _jobs_db_properties(resumes_db_id))
-    settings_db_id = await _create_database(token, parent_page_id, "Settings", _settings_db_properties())
+    jobs_db_id, jobs_ds_id = await _create_database(token, parent_page_id, "Jobs", _jobs_db_properties())
+    resumes_db_id, resumes_ds_id = await _create_database(token, parent_page_id, "Resumes", _resumes_db_properties(jobs_ds_id))
+    settings_db_id, settings_ds_id = await _create_database(token, parent_page_id, "Settings", _settings_db_properties())
+    profile_db_id, profile_ds_id = await _create_database(token, parent_page_id, "Profile", _profile_db_properties())
 
     user.notion_jobs_db_id = jobs_db_id
+    user.notion_jobs_data_source_id = jobs_ds_id
     user.notion_resumes_db_id = resumes_db_id
+    user.notion_resumes_data_source_id = resumes_ds_id
     user.notion_settings_db_id = settings_db_id
+    user.notion_settings_data_source_id = settings_ds_id
+    user.notion_profile_db_id = profile_db_id
+    user.notion_profile_data_source_id = profile_ds_id
     await db.commit()
 
     return {
@@ -123,6 +141,7 @@ async def run_notion_setup(user: User, db: AsyncSession) -> dict:
         "jobs_db_id": jobs_db_id,
         "resumes_db_id": resumes_db_id,
         "settings_db_id": settings_db_id,
+        "profile_db_id": profile_db_id,
     }
 
 

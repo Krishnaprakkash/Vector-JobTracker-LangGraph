@@ -5,12 +5,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import select
 
-from .models import Job, User, Resume
+from .models import Job, User
 from .fit import fit_label
 from .notion_rate_limiter import throttle_notion
 
 NOTION_API = "https://api.notion.com/v1"
-NOTION_VERSION = "2022-06-28"
+NOTION_VERSION = "2026-03-11"
 MAX_RETRIES = 2
 
 
@@ -22,7 +22,7 @@ def _headers(token: str) -> dict:
     }
 
 
-def _job_properties(job: Job, resume_notion_page_id: str | None = None) -> dict:
+def _job_properties(job: Job) -> dict:
     props = {
         "Title": {"title": [{"text": {"content": job.title[:2000]}}]},
         "Company": {"rich_text": [{"text": {"content": job.company[:2000]}}]},
@@ -47,8 +47,6 @@ def _job_properties(job: Job, resume_notion_page_id: str | None = None) -> dict:
         props["Source"] = {"select": {"name": job.source}}
     if job.url:
         props["URL"] = {"url": job.url}
-    if resume_notion_page_id:
-        props["Resume"] = {"relation": [{"id": resume_notion_page_id}]}
     return props
 
 
@@ -79,17 +77,11 @@ async def sync_job_to_notion(db: AsyncSession, job: Job, user: User) -> bool:
     """Returns True on success, False on failure. Never raises — per-job Notion
     sync failures are an accepted gap (consistent with comp/scoring_failed pattern)
     and must not abort the calling batch."""
-    if not user.notion_access_token or not user.notion_jobs_db_id:
+    if not user.notion_access_token or not user.notion_jobs_data_source_id:
         return False
 
     headers = _headers(user.notion_access_token)
-
-    resume_notion_page_id = None
-    if job.resume_id:
-        result = await db.execute(select(Resume.notion_page_id).where(Resume.id == job.resume_id))
-        resume_notion_page_id = result.scalar_one_or_none()
-
-    properties = _job_properties(job, resume_notion_page_id)
+    properties = _job_properties(job)
     workspace_id = user.notion_workspace_id or str(user.id)
 
     try:
@@ -107,7 +99,7 @@ async def sync_job_to_notion(db: AsyncSession, job: Job, user: User) -> bool:
                     return True
 
             payload = {
-                "parent": {"database_id": user.notion_jobs_db_id},
+                "parent": {"type": "data_source_id", "data_source_id": user.notion_jobs_data_source_id},
                 "properties": properties,
                 "children": _description_body(job),
             }

@@ -10,7 +10,7 @@ from sqlalchemy import select, func
 
 from .config import settings
 from .db import AsyncSessionLocal
-from .models import Job, User, Resume, JobStatus, ResumeChunk
+from .models import Job, User, Resume, JobStatus, Profile, ProfileItem, ProfileChunk, ProfileSection
 from .resumes import _resume_path, _build_summary
 from .resume_parser import extract_resume_text
 from .chunking import chunk_resume_text
@@ -20,7 +20,7 @@ from .manual_add import extract_jsonld_jobposting, enrich_manual_job, tavily_sea
 router = APIRouter(prefix="/api/notion-webhook", tags=["notion"])
 
 NOTION_API = "https://api.notion.com/v1"
-NOTION_VERSION = "2022-06-28"
+NOTION_VERSION = "2026-03-11"
 
 
 def _headers(token: str) -> dict:
@@ -46,13 +46,94 @@ def _extract_rich_text(prop: dict | None) -> str:
     return "".join(t.get("plain_text", "") for t in prop.get("rich_text", []))
 
 
-async def _resolve_resume_id(db, user_id, resume_notion_page_id: str | None):
-    if not resume_notion_page_id:
-        return None
+async def _get_or_create_profile(db, user_id) -> Profile:
+    result = await db.execute(select(Profile).where(Profile.user_id == user_id))
+    profile = result.scalar_one_or_none()
+    if not profile:
+        profile = Profile(user_id=user_id)
+        db.add(profile)
+        await db.flush()
+    return profile
+
+
+async def _rechunk_section(db, profile_id: uuid.UUID, section: ProfileSection) -> None:
     result = await db.execute(
-        select(Resume.id).where(Resume.notion_page_id == resume_notion_page_id, Resume.user_id == user_id)
+        select(ProfileItem.content).where(ProfileItem.profile_id == profile_id, ProfileItem.section == section)
     )
-    return result.scalar_one_or_none()
+    contents = [row[0] for row in result.all()]
+
+    existing = await db.execute(
+        select(ProfileChunk).where(ProfileChunk.profile_id == profile_id, ProfileChunk.section == section)
+    )
+    chunk = existing.scalar_one_or_none()
+
+    if not contents:
+        if chunk:
+            await db.delete(chunk)
+            await db.commit()
+        return
+
+    text = "\n".join(contents)
+    embedding = embed_texts([text])[0]
+
+    if chunk:
+        chunk.content = text
+        chunk.embedding = embedding
+    else:
+        db.add(ProfileChunk(profile_id=profile_id, section=section, content=text, embedding=embedding))
+    await db.commit()
+
+
+async def _handle_profile_item_change(user: User, page: dict) -> None:
+    props = page.get("properties", {})
+    title = _extract_title_text(props.get("Title"))
+    section_name = (props.get("Section", {}).get("select") or {}).get("name")
+    details = _extract_rich_text(props.get("Details"))
+
+    if not section_name:
+        return  # accepted gap: user hasn't picked a section yet
+
+    try:
+        section = ProfileSection(section_name.lower())
+    except ValueError:
+        return  # unrecognized section value; accepted gap
+
+    content = f"{title}. {details}".strip(". ").strip()
+    if not content:
+        return
+
+    async with AsyncSessionLocal() as db:
+        profile = await _get_or_create_profile(db, user.id)
+
+        result = await db.execute(
+            select(ProfileItem).where(ProfileItem.notion_page_id == page["id"], ProfileItem.profile_id == profile.id)
+        )
+        item = result.scalar_one_or_none()
+        old_section = item.section if item else None
+
+        if item:
+            item.section = section
+            item.content = content
+        else:
+            item = ProfileItem(profile_id=profile.id, section=section, content=content, notion_page_id=page["id"])
+            db.add(item)
+        await db.commit()
+
+        await _rechunk_section(db, profile.id, section)
+        if old_section and old_section != section:
+            await _rechunk_section(db, profile.id, old_section)
+
+
+async def _handle_profile_item_deleted(user: User, entity_id: str) -> None:
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(ProfileItem).where(ProfileItem.notion_page_id == entity_id))
+        item = result.scalar_one_or_none()
+        if not item:
+            return
+        profile_id, section = item.profile_id, item.section
+        await db.delete(item)
+        await db.commit()
+        await _rechunk_section(db, profile_id, section)
 
 async def _sync_enriched_fields_to_notion(token: str, page_id: str, location: str | None, description: str | None, enrichment: dict, status: str | None = None, source: str | None = None) -> None:
     from .fit import fit_label
@@ -88,13 +169,12 @@ async def _sync_enriched_fields_to_notion(token: str, page_id: str, location: st
             json={"properties": properties},
         )
 
+
 async def _handle_job_created(user: User, page: dict) -> None:
     props = page.get("properties", {})
     title = _extract_title_text(props.get("Title"))
     company = _extract_rich_text(props.get("Company"))
     url_prop = props.get("URL", {}).get("url")
-    resume_relation = props.get("Resume", {}).get("relation", [])
-    resume_page_id = resume_relation[0]["id"] if resume_relation else None
 
     if not title:
         return  # nothing usable yet; user still typing
@@ -103,11 +183,6 @@ async def _handle_job_created(user: User, page: dict) -> None:
         existing = await db.execute(select(Job.id).where(Job.notion_page_id == page["id"]))
         if existing.scalar_one_or_none():
             return  # page created via our own API sync, not a genuine user-created row
-
-        resume_id = await _resolve_resume_id(db, user.id, resume_page_id)
-        if resume_page_id and not resume_id:
-            await asyncio.sleep(3)
-            resume_id = await _resolve_resume_id(db, user.id, resume_page_id)
 
         description = None
         location = None
@@ -128,12 +203,11 @@ async def _handle_job_created(user: User, page: dict) -> None:
         if not description:
             description = await tavily_search_summarize(title, company, None)
 
-        enrichment = await enrich_manual_job(db, title, location, description, resume_id, None, None)
+        enrichment = await enrich_manual_job(db, title, location, description, None, None, None)
 
         dedup_key = f"notion-{page['id']}"
         job = Job(
             user_id=user.id,
-            resume_id=resume_id,
             company=company or "unknown",
             title=title,
             location=location,
@@ -154,60 +228,6 @@ async def _handle_job_created(user: User, page: dict) -> None:
         await db.commit()
 
     await _sync_enriched_fields_to_notion(user.notion_access_token, page["id"], location, description, enrichment, status=job.status.value, source=job.source)
-
-
-async def _handle_resume_created(user: User, page: dict) -> None:
-    props = page.get("properties", {})
-    files = props.get("File", {}).get("files", [])
-
-    if not files:
-        await asyncio.sleep(3)
-        page = await _fetch_page(user.notion_access_token, page["id"])
-        files = page.get("properties", {}).get("File", {}).get("files", [])
-
-    if not files:
-        return  # accepted gap: no file attached
-
-    file_info = files[0]
-    file_url = (file_info.get("file") or file_info.get("external") or {}).get("url")
-    filename = file_info.get("name", "resume.pdf")
-
-    if not file_url or not filename.lower().endswith(".pdf"):
-        return
-
-    resume_id = uuid.uuid4()
-    file_path = _resume_path(resume_id)
-
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-        resp = await client.get(file_url)
-    resp.raise_for_status()
-
-    with open(file_path, "wb") as f:
-        f.write(resp.content)
-
-    async with AsyncSessionLocal() as db:
-        try:
-            text = extract_resume_text(file_path)
-            if not text:
-                return
-            chunks = chunk_resume_text(text)
-            if not chunks:
-                return
-            embeddings = embed_texts([c["content"] for c in chunks])
-            summary = _build_summary(chunks)
-
-            resume = Resume(id=resume_id, user_id=user.id, filename=filename, summary=summary, notion_page_id=page["id"])
-            db.add(resume)
-            await db.flush()
-
-            for chunk, vector in zip(chunks, embeddings):
-                db.add(ResumeChunk(resume_id=resume.id, section=chunk["section"], content=chunk["content"], embedding=vector))
-
-            await db.commit()
-        except Exception:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            raise
 
 
 async def _fetch_page(token: str, page_id: str) -> dict:
@@ -318,22 +338,23 @@ async def notion_webhook(request: Request, background_tasks: BackgroundTasks):
                 if job:
                     await db.delete(job)
                     await db.commit()
+                    return {"status": "ok"}
+            await _handle_profile_item_deleted(user, entity_id)
             return {"status": "ok"}
         page = await _fetch_page(user.notion_access_token, entity_id)
     except Exception:
         return {"status": "fetch_failed"}
 
     parent = page.get("parent", {})
-    parent_db_id = parent.get("database_id")
+    parent_ds_id = parent.get("data_source_id")
 
-    if parent_db_id == user.notion_settings_db_id:
+    if parent_ds_id == user.notion_settings_data_source_id:
         await _handle_settings_change(user, page, background_tasks)
-    elif parent_db_id == user.notion_jobs_db_id:
+    elif parent_ds_id == user.notion_jobs_data_source_id:
         if event_type == "page.created":
             background_tasks.add_task(_handle_job_created, user, page)
         else:
             await _handle_job_status_change(user, page)
-    elif parent_db_id == user.notion_resumes_db_id:
-        if event_type == "page.created":
-            background_tasks.add_task(_handle_resume_created, user, page)
+    elif parent_ds_id == user.notion_profile_data_source_id:
+        background_tasks.add_task(_handle_profile_item_change, user, page)
     return {"status": "ok"}

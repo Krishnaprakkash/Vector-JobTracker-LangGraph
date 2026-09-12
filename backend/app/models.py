@@ -20,6 +20,14 @@ class JobStatus(str, enum.Enum):
     scoring_failed = "scoring_failed"
 
 
+class ProfileSection(str, enum.Enum):
+    skills = "skills"
+    experience = "experience"
+    education = "education"
+    projects = "projects"
+    certifications = "certifications"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -37,35 +45,72 @@ class User(Base):
     notion_access_token: Mapped[str | None] = mapped_column(String, nullable=True)
     notion_bot_id: Mapped[str | None] = mapped_column(String, nullable=True)
     notion_jobs_db_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    notion_jobs_data_source_id: Mapped[str | None] = mapped_column(String, nullable=True)
     notion_resumes_db_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    notion_resumes_data_source_id: Mapped[str | None] = mapped_column(String, nullable=True)
     notion_settings_db_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    notion_settings_data_source_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    notion_profile_db_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    notion_profile_data_source_id: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    profile: Mapped["Profile | None"] = relationship(back_populates="user", uselist=False, cascade="all, delete-orphan")
 
 
 class Resume(Base):
+    """Terminal artifact: per-job Optimizer-generated PDF output only. Never chunked/embedded."""
     __tablename__ = "resumes"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
     filename: Mapped[str] = mapped_column(String)
-    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pdf_path: Mapped[str] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     user: Mapped["User"] = relationship(back_populates="resumes")
-    chunks: Mapped[list["ResumeChunk"]] = relationship(back_populates="resume", cascade="all, delete-orphan")
 
     notion_page_id: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
-class ResumeChunk(Base):
-    __tablename__ = "resume_chunks"
+class Profile(Base):
+    """Singular per-user canonical source of truth for matching + resume optimization."""
+    __tablename__ = "profiles"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    resume_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("resumes.id", ondelete="CASCADE"))
-    section: Mapped[str] = mapped_column(String)  # skills | experience | education
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    user: Mapped["User"] = relationship(back_populates="profile")
+    items: Mapped[list["ProfileItem"]] = relationship(back_populates="profile", cascade="all, delete-orphan")
+    chunks: Mapped[list["ProfileChunk"]] = relationship(back_populates="profile", cascade="all, delete-orphan")
+
+
+class ProfileItem(Base):
+    """One user-entered fact within a Profile section (Notion-sourced)."""
+    __tablename__ = "profile_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    profile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"))
+    section: Mapped[ProfileSection] = mapped_column(SAEnum(ProfileSection))
+    content: Mapped[str] = mapped_column(Text)
+    notion_page_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    profile: Mapped["Profile"] = relationship(back_populates="items")
+
+
+class ProfileChunk(Base):
+    """One row per section: synthetic concatenated section text + embedding. Replaces ResumeChunk."""
+    __tablename__ = "profile_chunks"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    profile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"))
+    section: Mapped[ProfileSection] = mapped_column(SAEnum(ProfileSection))
     content: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list[float]] = mapped_column(Vector(768))
 
-    resume: Mapped["Resume"] = relationship(back_populates="chunks")
+    profile: Mapped["Profile"] = relationship(back_populates="chunks")
+    __table_args__ = (UniqueConstraint("profile_id", "section", name="uq_profile_section"),)
 
 
 class Job(Base):
@@ -73,7 +118,7 @@ class Job(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    resume_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("resumes.id"), nullable=True)
+    optimized_resume_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("resumes.id"), nullable=True)
 
     company: Mapped[str] = mapped_column(String)
     title: Mapped[str] = mapped_column(String)
