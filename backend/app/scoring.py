@@ -50,7 +50,7 @@ async def extract_job_requirements(description: str) -> dict | None:
 async def _get_top_profile_chunks(db: AsyncSession, user_id: uuid.UUID, job_description: str) -> list[str]:
     if not job_description:
         return []
-    query_vector = embed_query(job_description)
+    query_vector = await embed_query(job_description)
 
     stmt = (
         select(ProfileChunk.content)

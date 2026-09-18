@@ -118,9 +118,9 @@ async def _fetch_static_company_jobs(
     if not query or not jobs:
         return jobs[:remaining_slots]
 
-    query_vector = embed_query(query)
+    query_vector = await embed_query(query)
     titles = [j["title"] for j in jobs]
-    title_vectors = embed_texts(titles)
+    title_vectors = await embed_texts(titles)
     scored = [(j, _cosine_sim(query_vector, tv)) for j, tv in zip(jobs, title_vectors)]
     scored.sort(key=lambda x: x[1], reverse=True)
     return [j for j, _ in scored[:remaining_slots]]

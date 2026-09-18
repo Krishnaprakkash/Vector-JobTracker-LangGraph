@@ -71,7 +71,7 @@ async def _rechunk_section(db, profile_id: uuid.UUID, section: ProfileSection) -
         return
 
     text = "\n".join(contents)
-    embedding = embed_texts([text])[0]
+    embedding = (await embed_texts([text]))[0]
 
     if chunk:
         chunk.content = text

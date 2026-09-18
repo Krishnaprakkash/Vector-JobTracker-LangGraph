@@ -1,6 +1,6 @@
+import asyncio
 from sentence_transformers import SentenceTransformer
 from functools import lru_cache
-import numpy as np
 
 MODEL_NAME = "BAAI/bge-base-en-v1.5"
 EMBED_DIM = 768
@@ -11,9 +11,7 @@ def _get_model() -> SentenceTransformer:
     return SentenceTransformer(MODEL_NAME)
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
-    if not texts:
-        return []
+def _encode(texts: list[str]) -> list[list[float]]:
     model = _get_model()
     vectors = model.encode(
         texts,
@@ -24,5 +22,13 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     return vectors.tolist()
 
 
-def embed_query(text: str) -> list[float]:
-    return embed_texts([f"query: {text}"])[0] if text else [0.0] * EMBED_DIM
+async def embed_texts(texts: list[str]) -> list[list[float]]:
+    if not texts:
+        return []
+    return await asyncio.to_thread(_encode, texts)
+
+
+async def embed_query(text: str) -> list[float]:
+    if not text:
+        return [0.0] * EMBED_DIM
+    return (await embed_texts([f"query: {text}"]))[0]
